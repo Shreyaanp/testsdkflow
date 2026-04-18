@@ -8,8 +8,8 @@ User=ubuntu
 WorkingDirectory=/opt/testsdkflow
 EnvironmentFile=/opt/testsdkflow/.env
 Environment=NODE_ENV=production
-Environment=PORT=3000
-ExecStart=/usr/bin/npx --no-install next start -p 3000
+Environment=PORT=3010
+ExecStart=/usr/bin/npx --no-install next start -p 3010
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal
