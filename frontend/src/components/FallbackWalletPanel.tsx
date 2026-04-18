@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import bs58 from "bs58";
+// bs58 import kept here (browser fallback uses base58 — Mercle bridge uses base64).
 
 export function FallbackWalletPanel() {
   const { publicKey, signMessage, disconnect, connected } = useWallet();

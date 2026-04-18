@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import bs58 from "bs58";
+import {
+  BridgeCancelledError,
+  connectWallet,
+  disconnectWallet,
+  encodeUtf8ToBase64,
+  getWalletAddress,
+  isWalletConnected,
+  signMessage,
+} from "../lib/mercle-bridge";
 
 type WalletState =
   | { kind: "idle" }
@@ -14,10 +22,9 @@ export function BridgeWalletPanel() {
 
   const refresh = useCallback(async () => {
     try {
-      const b = window.MercleBridge!;
-      const connected = await b.isWalletConnected();
+      const connected = await isWalletConnected();
       if (!connected) return setState({ kind: "idle" });
-      const address = (await b.getWalletAddress()) ?? "";
+      const address = (await getWalletAddress()) ?? "";
       setState({ kind: "connected", address });
     } catch (e) {
       setState({
@@ -34,13 +41,18 @@ export function BridgeWalletPanel() {
   const onConnect = async () => {
     setBusy("connect");
     try {
-      const { publicKey } = await window.MercleBridge!.connectWallet();
-      setState({ kind: "connected", address: publicKey });
+      const result = await connectWallet();
+      if (!result) {
+        // User cancelled
+        setBusy(null);
+        return;
+      }
+      setState({ kind: "connected", address: result.publicKey });
       setSignature(null);
     } catch (e) {
       setState({
         kind: "error",
-        message: e instanceof Error ? e.message : "User cancelled connect",
+        message: e instanceof Error ? e.message : "Connect failed",
       });
     } finally {
       setBusy(null);
@@ -52,10 +64,13 @@ export function BridgeWalletPanel() {
     setBusy("sign");
     try {
       const msg = `Sign in to sdk.mercle.id\n\naddress: ${state.address}\nnonce: ${Date.now()}`;
-      const encoded = bs58.encode(new TextEncoder().encode(msg));
-      const sig = await window.MercleBridge!.signMessage(encoded);
+      const sig = await signMessage(encodeUtf8ToBase64(msg));
       setSignature(sig);
     } catch (e) {
+      if (e instanceof BridgeCancelledError) {
+        setBusy(null);
+        return;
+      }
       setState({
         kind: "error",
         message: e instanceof Error ? e.message : "Sign rejected",
@@ -68,9 +83,11 @@ export function BridgeWalletPanel() {
   const onDisconnect = async () => {
     setBusy("disconnect");
     try {
-      await window.MercleBridge!.disconnectWallet();
-      setSignature(null);
-      setState({ kind: "idle" });
+      const ok = await disconnectWallet();
+      if (ok) {
+        setSignature(null);
+        setState({ kind: "idle" });
+      }
     } catch (e) {
       setState({
         kind: "error",
@@ -86,7 +103,9 @@ export function BridgeWalletPanel() {
       <div className="row between">
         <div>
           <h2>Wallet</h2>
-          <div className="sub">Via <code>window.MercleBridge</code> — scoped to this mini-app.</div>
+          <div className="sub">
+            Via <code>flutter_inappwebview → MercleBridge</code> — scoped to this mini-app.
+          </div>
         </div>
         {state.kind === "connected" ? (
           <span className="pill ok">connected</span>
