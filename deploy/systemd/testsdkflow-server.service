@@ -1,0 +1,17 @@
+[Unit]
+Description=testsdkflow verify-token proxy
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/testsdkflow/server
+EnvironmentFile=/opt/testsdkflow/server/.env
+ExecStart=/usr/bin/node src/index.js
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

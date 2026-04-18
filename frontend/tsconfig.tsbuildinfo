@@ -1,0 +1,1 @@
+{"root":["./src/main.tsx","./src/components/bridgewalletpanel.tsx","./src/components/fallbackwalletpanel.tsx","./src/lib/mercle-bridge.ts","./src/lib/verify.ts","./src/providers/walletproviders.tsx","./src/routes/oauth.tsx"],"version":"5.9.3"}
