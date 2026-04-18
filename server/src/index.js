@@ -6,6 +6,7 @@ const {
   MERCLE_APP_ID,
   MERCLE_API_KEY,
   MERCLE_OAUTH_BASE = "https://oauth.mercle.ai",
+  MERCLE_PORTAL_BASE = "https://prodbackend.mercle.ai",
   PORT = 3001,
 } = process.env;
 
@@ -14,7 +15,10 @@ if (!MERCLE_APP_ID || !MERCLE_API_KEY) {
   process.exit(1);
 }
 
-const MERCLE_SDK_BASE = `${MERCLE_OAUTH_BASE}/api/mercle-sdk`;
+// verify-token lives on the OAuth backend
+const VERIFY_TOKEN_URL = `${MERCLE_OAUTH_BASE}/api/mercle-sdk/mini-app/verify-token`;
+// SDK session (create/status) lives on the portal backend
+const SDK_SESSION_BASE = `${MERCLE_PORTAL_BASE}/api/mercle-sdk`;
 
 const app = express();
 app.use(express.json({ limit: "64kb" }));
@@ -24,8 +28,8 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, app_id: MERCLE_APP_ID });
 });
 
-async function mercleFetch(path, init = {}) {
-  const res = await fetch(`${MERCLE_SDK_BASE}${path}`, {
+async function mercleFetch(url, init = {}) {
+  const res = await fetch(url, {
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -44,7 +48,7 @@ app.post("/api/auth/mercle", async (req, res) => {
     return res.status(400).json({ error: "Missing token" });
   }
   try {
-    const { ok, status, data } = await mercleFetch("/mini-app/verify-token", {
+    const { ok, status, data } = await mercleFetch(VERIFY_TOKEN_URL, {
       method: "POST",
       body: JSON.stringify({ token }),
     });
@@ -76,10 +80,13 @@ app.post("/api/auth/mercle", async (req, res) => {
 // Path 2a — create SDK session (fallback when bridge refuses)
 app.post("/api/auth/mercle/session/create", async (_req, res) => {
   try {
-    const { ok, status, data } = await mercleFetch("/session/create", {
-      method: "POST",
-      body: JSON.stringify({ metadata: { source: "miniapp", app_id: MERCLE_APP_ID } }),
-    });
+    const { ok, status, data } = await mercleFetch(
+      `${SDK_SESSION_BASE}/session/create`,
+      {
+        method: "POST",
+        body: JSON.stringify({ metadata: { source: "miniapp", app_id: MERCLE_APP_ID } }),
+      }
+    );
     if (!ok) {
       return res.status(status || 502).json({
         error: "Failed to create SDK session",
@@ -108,7 +115,7 @@ app.get("/api/auth/mercle/session/status", async (req, res) => {
   }
   try {
     const { ok, status, data } = await mercleFetch(
-      `/session/status?session_id=${encodeURIComponent(sessionId)}`
+      `${SDK_SESSION_BASE}/session/status?session_id=${encodeURIComponent(sessionId)}`
     );
     if (!ok) {
       return res.status(status || 502).json({
