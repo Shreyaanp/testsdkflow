@@ -7,6 +7,7 @@ import {
 import { verifyMercleToken, type VerifiedSession } from "../lib/verify";
 import { BridgeWalletPanel } from "../components/BridgeWalletPanel";
 import { FallbackWalletPanel } from "../components/FallbackWalletPanel";
+import { DiagnosticsPanel } from "../components/DiagnosticsPanel";
 
 type Phase =
   | { kind: "booting" }
@@ -68,6 +69,8 @@ export function OAuthPage() {
       ) : phase.kind === "no-bridge" ? (
         <FallbackWalletPanel />
       ) : null}
+
+      <DiagnosticsPanel />
 
       <footer className="card">
         <div className="sub">
