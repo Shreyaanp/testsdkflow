@@ -1,11 +1,19 @@
 import { useEffect, useState } from "react";
 
 type Row = { k: string; v: string };
+type Probe = { name: string; status: "pending" | "ok" | "err"; detail: string };
 
 function safeStringify(v: unknown): string {
   try {
     if (typeof v === "function") return "[function]";
-    return JSON.stringify(v, null, 2);
+    if (v instanceof Error) return `${v.name}: ${v.message}`;
+    const s = JSON.stringify(v, (_, val) => {
+      if (typeof val === "string" && val.length > 240) {
+        return val.slice(0, 80) + "…" + val.slice(-40);
+      }
+      return val;
+    }, 2);
+    return s ?? String(v);
   } catch {
     return String(v);
   }
@@ -13,70 +21,139 @@ function safeStringify(v: unknown): string {
 
 export function DiagnosticsPanel() {
   const [rows, setRows] = useState<Row[]>([]);
-  const [bridgeRaw, setBridgeRaw] = useState<string>("(not called)");
-  const [running, setRunning] = useState(false);
+  const [probes, setProbes] = useState<Probe[]>([]);
 
   useEffect(() => {
     const w = window as any;
-    const snapshot: Row[] = [
+    const legacyKeys =
+      w.MercleBridge && typeof w.MercleBridge === "object"
+        ? Object.keys(w.MercleBridge).join(", ")
+        : "(no MercleBridge)";
+
+    setRows([
       { k: "UA", v: navigator.userAgent },
       { k: "href", v: location.href },
-      { k: "has window.flutter_inappwebview", v: String(typeof w.flutter_inappwebview !== "undefined") },
-      { k: "  .callHandler", v: String(typeof w.flutter_inappwebview?.callHandler) },
-      { k: "has window.MercleBridge (legacy)", v: String(typeof w.MercleBridge !== "undefined") },
       {
-        k: "top-level keys matching /mercle|flutter|bridge/i",
-        v: Object.keys(w)
-          .filter((k) => /mercle|flutter|bridge|inappwebview/i.test(k))
-          .join(", ") || "(none)",
+        k: "window.flutter_inappwebview",
+        v: String(typeof w.flutter_inappwebview !== "undefined"),
+      },
+      {
+        k: "  .callHandler",
+        v: String(typeof w.flutter_inappwebview?.callHandler),
+      },
+      {
+        k: "window.MercleBridge",
+        v: String(typeof w.MercleBridge !== "undefined"),
+      },
+      { k: "  MercleBridge keys", v: legacyKeys },
+      {
+        k: "window.__mercle_injected_inapp",
+        v: safeStringify(w.__mercle_injected_inapp),
+      },
+    ]);
+
+    const plan: Array<{ name: string; run: () => Promise<unknown> }> = [
+      {
+        name: "MercleBridge.refreshToken()  [legacy direct]",
+        run: () =>
+          typeof w.MercleBridge?.refreshToken === "function"
+            ? Promise.resolve(w.MercleBridge.refreshToken())
+            : Promise.reject(new Error("method missing")),
+      },
+      {
+        name: "MercleBridge.getToken()  [legacy direct]",
+        run: () =>
+          typeof w.MercleBridge?.getToken === "function"
+            ? Promise.resolve(w.MercleBridge.getToken())
+            : Promise.reject(new Error("method missing")),
+      },
+      {
+        name: "callHandler('MercleBridge', 'refreshToken')  [v1]",
+        run: () =>
+          typeof w.flutter_inappwebview?.callHandler === "function"
+            ? w.flutter_inappwebview.callHandler("MercleBridge", "refreshToken")
+            : Promise.reject(new Error("callHandler missing")),
+      },
+      {
+        name: "callHandler('MercleBridge', 'getToken')  [v1]",
+        run: () =>
+          typeof w.flutter_inappwebview?.callHandler === "function"
+            ? w.flutter_inappwebview.callHandler("MercleBridge", "getToken")
+            : Promise.reject(new Error("callHandler missing")),
       },
     ];
-    setRows(snapshot);
-  }, []);
 
-  const tryRefreshToken = async () => {
-    setRunning(true);
-    const w = window as any;
-    try {
-      if (typeof w.flutter_inappwebview?.callHandler !== "function") {
-        setBridgeRaw("flutter_inappwebview.callHandler is not a function");
-        return;
-      }
-      const result = await w.flutter_inappwebview.callHandler(
-        "MercleBridge",
-        "refreshToken"
-      );
-      setBridgeRaw(safeStringify(result));
-    } catch (e) {
-      setBridgeRaw(
-        "THREW: " + (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
-      );
-    } finally {
-      setRunning(false);
-    }
-  };
+    setProbes(plan.map((p) => ({ name: p.name, status: "pending", detail: "…" })));
+
+    plan.forEach((p, i) => {
+      Promise.resolve()
+        .then(() => p.run())
+        .then((r) => {
+          setProbes((cur) => {
+            const next = [...cur];
+            next[i] = { name: p.name, status: "ok", detail: safeStringify(r) };
+            return next;
+          });
+        })
+        .catch((e) => {
+          setProbes((cur) => {
+            const next = [...cur];
+            next[i] = {
+              name: p.name,
+              status: "err",
+              detail:
+                e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+            };
+            return next;
+          });
+        });
+    });
+  }, []);
 
   return (
     <section className="card stack">
       <h2>Diagnostics</h2>
-      <div className="sub">
-        Read this top-to-bottom — tells us whether the bridge is present and
-        what <code>refreshToken</code> actually returns.
-      </div>
+      <div className="sub">Probes run automatically on page load.</div>
       <div className="kv">
-        {rows.map(({ k, v }) => (
-          <>
-            <div className="k" key={`k-${k}`}>{k}</div>
-            <div className="v" key={`v-${k}`}>{v}</div>
-          </>
+        {rows.map(({ k, v }, i) => (
+          <div key={i} style={{ display: "contents" }}>
+            <div className="k">{k}</div>
+            <div className="v">{v}</div>
+          </div>
         ))}
       </div>
-      <button className="btn secondary" onClick={tryRefreshToken} disabled={running}>
-        {running ? "Calling bridge…" : "Call MercleBridge.refreshToken"}
-      </button>
-      <div className="alert info">
-        <div style={{ marginBottom: 6, color: "var(--ok)" }}>raw bridge response</div>
-        <pre className="addr" style={{ whiteSpace: "pre-wrap", margin: 0 }}>{bridgeRaw}</pre>
+      <div className="stack" style={{ gap: 8 }}>
+        {probes.map((p, i) => (
+          <div key={i} className="alert info">
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginBottom: 6,
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>{p.name}</span>
+              <span
+                className={
+                  "pill " +
+                  (p.status === "ok"
+                    ? "ok"
+                    : p.status === "err"
+                    ? ""
+                    : "muted")
+                }
+              >
+                {p.status}
+              </span>
+            </div>
+            <pre
+              className="addr"
+              style={{ whiteSpace: "pre-wrap", margin: 0, fontSize: 12 }}
+            >
+              {p.detail}
+            </pre>
+          </div>
+        ))}
       </div>
     </section>
   );
