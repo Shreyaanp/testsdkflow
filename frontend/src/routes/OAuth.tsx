@@ -3,6 +3,7 @@ import {
   getAppInfo,
   isInMercleApp,
   refreshToken,
+  TokenUnavailableError,
 } from "../lib/mercle-bridge";
 import { verifyMercleToken, type VerifiedSession } from "../lib/verify";
 import { BridgeWalletPanel } from "../components/BridgeWalletPanel";
@@ -13,7 +14,7 @@ type Phase =
   | { kind: "booting" }
   | { kind: "no-bridge" }
   | { kind: "authenticating" }
-  | { kind: "no-token" }
+  | { kind: "token-unavailable"; message: string }
   | { kind: "ready"; session: VerifiedSession }
   | { kind: "error"; message: string };
 
@@ -30,29 +31,30 @@ export function OAuthPage() {
       }
       setPhase({ kind: "authenticating" });
       try {
-        const info = await getAppInfo();
+        const info = getAppInfo();
         if (info?.platform) setPlatform(info.platform);
 
         const token = await refreshToken();
-        if (!token) {
-          if (!cancelled) setPhase({ kind: "no-token" });
-          return;
-        }
         const session = await verifyMercleToken(token);
         if (!cancelled) setPhase({ kind: "ready", session });
       } catch (e) {
-        if (!cancelled) {
-          setPhase({
-            kind: "error",
-            message: e instanceof Error ? e.message : "Authentication failed",
-          });
+        if (cancelled) return;
+        if (e instanceof TokenUnavailableError) {
+          setPhase({ kind: "token-unavailable", message: e.message });
+          return;
         }
+        setPhase({
+          kind: "error",
+          message: e instanceof Error ? e.message : "Authentication failed",
+        });
       }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
+
+  const bridgePresent = phase.kind !== "no-bridge";
 
   return (
     <div className="page">
@@ -64,20 +66,19 @@ export function OAuthPage() {
 
       <AuthCard phase={phase} />
 
-      {phase.kind === "ready" ? (
-        <BridgeWalletPanel />
-      ) : phase.kind === "no-bridge" ? (
-        <FallbackWalletPanel />
-      ) : null}
+      {/*
+        Wallet panel is available regardless of token state — the bridge's
+        wallet methods may work even when token auth is disabled.
+      */}
+      {bridgePresent ? <BridgeWalletPanel /> : <FallbackWalletPanel />}
 
       <DiagnosticsPanel />
 
       <footer className="card">
         <div className="sub">
-          Face + email verification happens in the Mercle host app. This
-          mini-app receives the resulting JWT via{" "}
-          <code>flutter_inappwebview.callHandler('MercleBridge', 'refreshToken')</code>
-          {" "}and then exposes Solana wallet primitives.
+          This page uses the legacy <code>window.MercleBridge</code> direct API
+          exposed by the Mercle mobile webview. Face + email verification
+          happens in the host app before this page loads.
         </div>
       </footer>
     </div>
@@ -91,7 +92,7 @@ function AuthCard({ phase }: { phase: Phase }) {
         <h2>Signing you in</h2>
         <div className="sub">
           <span className="spinner" />
-          Calling <code>refreshToken</code> on the Mercle bridge…
+          Calling <code>MercleBridge.refreshToken()</code>…
         </div>
       </section>
     );
@@ -103,9 +104,9 @@ function AuthCard({ phase }: { phase: Phase }) {
           <div>
             <h2>Open in Mercle to sign in</h2>
             <div className="sub">
-              This page expects <code>window.flutter_inappwebview</code> — only
-              present inside the Mercle app's webview. You can still test wallet
-              flows below with a browser wallet.
+              This page expects <code>window.MercleBridge</code> — only present
+              inside the Mercle app's webview. You can still test wallet flows
+              below with a browser wallet.
             </div>
           </div>
           <span className="pill muted">browser</span>
@@ -113,14 +114,16 @@ function AuthCard({ phase }: { phase: Phase }) {
       </section>
     );
   }
-  if (phase.kind === "no-token") {
+  if (phase.kind === "token-unavailable") {
     return (
       <section className="card">
-        <h2>Bridge responded with no token</h2>
-        <div className="alert info">
-          <code>refreshToken</code> returned <code>{"{success: false}"}</code>.
-          Usually means the Mercle app's on-device session hasn't been minted
-          yet — try force-quitting and reopening the Mercle app.
+        <h2>Host refused to issue a token</h2>
+        <div className="alert error" style={{ marginBottom: 8 }}>
+          {phase.message}
+        </div>
+        <div className="sub">
+          The Mercle app is in a state where it won't mint an auth token for
+          this mini-app. Wallet primitives may still work — scroll down.
         </div>
       </section>
     );

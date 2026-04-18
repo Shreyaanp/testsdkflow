@@ -54,32 +54,39 @@ export function DiagnosticsPanel() {
 
     const plan: Array<{ name: string; run: () => Promise<unknown> }> = [
       {
-        name: "MercleBridge.refreshToken()  [legacy direct]",
+        name: "MercleBridge.getAppInfo()",
+        run: () => {
+          try {
+            return Promise.resolve(w.MercleBridge?.getAppInfo?.());
+          } catch (e) {
+            return Promise.reject(e);
+          }
+        },
+      },
+      {
+        name: "MercleBridge._isReady",
+        run: () => Promise.resolve(w.MercleBridge?._isReady),
+      },
+      {
+        name: "MercleBridge.refreshToken()",
         run: () =>
           typeof w.MercleBridge?.refreshToken === "function"
             ? Promise.resolve(w.MercleBridge.refreshToken())
             : Promise.reject(new Error("method missing")),
       },
       {
-        name: "MercleBridge.getToken()  [legacy direct]",
+        name: "MercleBridge.isWalletConnected()",
         run: () =>
-          typeof w.MercleBridge?.getToken === "function"
-            ? Promise.resolve(w.MercleBridge.getToken())
+          typeof w.MercleBridge?.isWalletConnected === "function"
+            ? Promise.resolve(w.MercleBridge.isWalletConnected())
             : Promise.reject(new Error("method missing")),
       },
       {
-        name: "callHandler('MercleBridge', 'refreshToken')  [v1]",
+        name: "MercleBridge.getWalletAddress()",
         run: () =>
-          typeof w.flutter_inappwebview?.callHandler === "function"
-            ? w.flutter_inappwebview.callHandler("MercleBridge", "refreshToken")
-            : Promise.reject(new Error("callHandler missing")),
-      },
-      {
-        name: "callHandler('MercleBridge', 'getToken')  [v1]",
-        run: () =>
-          typeof w.flutter_inappwebview?.callHandler === "function"
-            ? w.flutter_inappwebview.callHandler("MercleBridge", "getToken")
-            : Promise.reject(new Error("callHandler missing")),
+          typeof w.MercleBridge?.getWalletAddress === "function"
+            ? Promise.resolve(w.MercleBridge.getWalletAddress())
+            : Promise.reject(new Error("method missing")),
       },
     ];
 

@@ -3,7 +3,7 @@ import {
   BridgeCancelledError,
   connectWallet,
   disconnectWallet,
-  encodeUtf8ToBase64,
+  encodeUtf8ToBase58,
   getWalletAddress,
   isWalletConnected,
   signMessage,
@@ -42,11 +42,7 @@ export function BridgeWalletPanel() {
     setBusy("connect");
     try {
       const result = await connectWallet();
-      if (!result) {
-        // User cancelled
-        setBusy(null);
-        return;
-      }
+      if (!result) return;
       setState({ kind: "connected", address: result.publicKey });
       setSignature(null);
     } catch (e) {
@@ -64,13 +60,11 @@ export function BridgeWalletPanel() {
     setBusy("sign");
     try {
       const msg = `Sign in to sdk.mercle.id\n\naddress: ${state.address}\nnonce: ${Date.now()}`;
-      const sig = await signMessage(encodeUtf8ToBase64(msg));
+      const encoded = await encodeUtf8ToBase58(msg);
+      const sig = await signMessage(encoded);
       setSignature(sig);
     } catch (e) {
-      if (e instanceof BridgeCancelledError) {
-        setBusy(null);
-        return;
-      }
+      if (e instanceof BridgeCancelledError) return;
       setState({
         kind: "error",
         message: e instanceof Error ? e.message : "Sign rejected",
@@ -83,11 +77,9 @@ export function BridgeWalletPanel() {
   const onDisconnect = async () => {
     setBusy("disconnect");
     try {
-      const ok = await disconnectWallet();
-      if (ok) {
-        setSignature(null);
-        setState({ kind: "idle" });
-      }
+      await disconnectWallet();
+      setSignature(null);
+      setState({ kind: "idle" });
     } catch (e) {
       setState({
         kind: "error",
@@ -104,7 +96,7 @@ export function BridgeWalletPanel() {
         <div>
           <h2>Wallet</h2>
           <div className="sub">
-            Via <code>flutter_inappwebview → MercleBridge</code> — scoped to this mini-app.
+            Via <code>window.MercleBridge</code> (legacy direct API). Scoped to this mini-app.
           </div>
         </div>
         {state.kind === "connected" ? (

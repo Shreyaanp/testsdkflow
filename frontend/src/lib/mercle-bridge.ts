@@ -1,18 +1,40 @@
-// Thin wrapper around the Mercle Flutter-InAppWebView bridge.
-// Bridge is exposed as `window.flutter_inappwebview.callHandler('MercleBridge', action, ...args)`.
+// Wrapper around the shipping Mercle Mini App bridge.
+//
+// Empirically this build exposes the LEGACY direct-object API:
+//   window.MercleBridge.{refreshToken,getToken,connectWallet,...}
+// The v1.0.0 `window.flutter_inappwebview.callHandler('MercleBridge', ...)`
+// pattern documented in @mercle/mcp-server 1.0.0 is not yet shipped — it
+// returns `{success: false, error: "Unsupported bridge action"}`.
+//
+// We therefore talk to the legacy object and normalize errors.
+
+type LegacyBridge = {
+  _isReady?: boolean;
+  getToken(): Promise<string>;
+  refreshToken(): Promise<string>;
+  getAppInfo(): { appId: string; appName: string; platform: string };
+  connectWallet(): Promise<{ publicKey: string; session?: string }>;
+  isWalletConnected(): Promise<boolean>;
+  getWalletAddress(): Promise<string | null>;
+  signTransaction(txBase58: string): Promise<string>;
+  signAllTransactions(txsBase58: string[]): Promise<string[]>;
+  signMessage(msgBase58: string): Promise<string>;
+  disconnectWallet(): Promise<void>;
+};
 
 declare global {
   interface Window {
+    MercleBridge?: LegacyBridge;
     flutter_inappwebview?: {
       callHandler: (handlerName: string, ...args: unknown[]) => Promise<any>;
     };
   }
 }
 
-export class BridgeTimeoutError extends Error {
-  constructor(action: string) {
-    super(`Mercle bridge call "${action}" timed out`);
-    this.name = "BridgeTimeoutError";
+export class BridgeUnavailableError extends Error {
+  constructor() {
+    super("window.MercleBridge is unavailable");
+    this.name = "BridgeUnavailableError";
   }
 }
 export class BridgeCancelledError extends Error {
@@ -21,127 +43,93 @@ export class BridgeCancelledError extends Error {
     this.name = "BridgeCancelledError";
   }
 }
-export class BridgeError extends Error {
-  constructor(action: string, detail?: string) {
-    super(`Mercle bridge "${action}" failed${detail ? `: ${detail}` : ""}`);
-    this.name = "BridgeError";
+/** Host app explicitly refused to issue a token (e.g., SDK session mode). */
+export class TokenUnavailableError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = "TokenUnavailableError";
   }
 }
 
 export function isInMercleApp(): boolean {
   return (
     typeof window !== "undefined" &&
-    typeof window.flutter_inappwebview !== "undefined" &&
-    typeof window.flutter_inappwebview.callHandler === "function"
+    !!window.MercleBridge &&
+    typeof window.MercleBridge.refreshToken === "function"
   );
 }
 
-type BridgeResult =
-  | { success: true; [k: string]: unknown }
-  | { success: false; error?: string; cancelled?: boolean }
-  | { cancelled: true }
-  | { connected?: boolean; address?: string; token?: string }
-  | Record<string, unknown>;
-
-async function callBridge<T extends BridgeResult = BridgeResult>(
-  action: string,
-  ...args: unknown[]
-): Promise<T> {
-  if (!isInMercleApp()) throw new BridgeError(action, "not in Mercle app");
-  const maxAttempts = 4;
-  let lastErr: unknown = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, 300 * attempt));
-    }
-    try {
-      const result = await window.flutter_inappwebview!.callHandler(
-        "MercleBridge",
-        action,
-        ...args
-      );
-      return (result ?? {}) as T;
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw new BridgeTimeoutError(action);
+function bridge(): LegacyBridge {
+  if (!isInMercleApp()) throw new BridgeUnavailableError();
+  return window.MercleBridge!;
 }
 
-export async function refreshToken(): Promise<string | null> {
-  const r: any = await callBridge("refreshToken");
-  if (r?.success && typeof r.token === "string") return r.token;
-  return null;
+function isTokenRefusal(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  return /session mode|token auth is not available/i.test(e.message);
 }
 
-export async function getAppInfo(): Promise<
-  { appId?: string; appName?: string; platform?: string } | null
-> {
+export async function refreshToken(): Promise<string> {
   try {
-    const r: any = await callBridge("getAppInfo");
-    if (r?.success === false) return null;
-    return {
-      appId: r.appId ?? r.app_id,
-      appName: r.appName ?? r.app_name,
-      platform: r.platform,
-    };
+    return await bridge().refreshToken();
+  } catch (e) {
+    if (isTokenRefusal(e)) {
+      throw new TokenUnavailableError(
+        e instanceof Error ? e.message : "Token unavailable"
+      );
+    }
+    throw e;
+  }
+}
+
+export function getAppInfo() {
+  if (!isInMercleApp()) return null;
+  try {
+    return bridge().getAppInfo();
   } catch {
     return null;
   }
 }
 
 export async function isWalletConnected(): Promise<boolean> {
-  const r: any = await callBridge("isWalletConnected");
-  return r?.connected === true || r?.success === true && r?.connected === true;
+  return bridge().isWalletConnected();
 }
 
 export async function getWalletAddress(): Promise<string | null> {
-  const r: any = await callBridge("getWalletAddress");
-  return (r?.address ?? r?.public_key ?? null) as string | null;
+  return bridge().getWalletAddress();
 }
 
 export async function connectWallet(): Promise<{
   publicKey: string;
   session?: string;
-  walletType?: string;
 } | null> {
-  const r: any = await callBridge("connectWallet");
-  if (r?.cancelled) return null;
-  if (!r?.success) throw new BridgeError("connectWallet", r?.error);
-  const publicKey = r.public_key ?? r.publicKey;
-  if (!publicKey) throw new BridgeError("connectWallet", "no public key");
-  return {
-    publicKey,
-    session: r.session,
-    walletType: r.wallet_type ?? r.walletType,
-  };
+  try {
+    const r = await bridge().connectWallet();
+    if (!r?.publicKey) return null;
+    return r;
+  } catch (e) {
+    if (e instanceof Error && /cancel/i.test(e.message)) return null;
+    throw e;
+  }
 }
 
-export async function signMessage(messageBase64: string): Promise<string> {
-  const r: any = await callBridge("signMessage", messageBase64);
-  if (r?.cancelled) throw new BridgeCancelledError("signMessage");
-  if (!r?.success) throw new BridgeError("signMessage", r?.error);
-  const sig = r.signature ?? r.signedMessage;
-  if (!sig) throw new BridgeError("signMessage", "empty signature");
-  return sig as string;
+export async function signMessage(messageBase58: string): Promise<string> {
+  try {
+    return await bridge().signMessage(messageBase58);
+  } catch (e) {
+    if (e instanceof Error && /cancel|reject/i.test(e.message)) {
+      throw new BridgeCancelledError("signMessage");
+    }
+    throw e;
+  }
 }
 
-export async function signTransaction(txBase64: string): Promise<string> {
-  const r: any = await callBridge("signTransaction", txBase64);
-  if (r?.cancelled) throw new BridgeCancelledError("signTransaction");
-  if (!r?.success) throw new BridgeError("signTransaction", r?.error);
-  return (r.signedTransaction ?? r.signed_transaction) as string;
+export async function disconnectWallet(): Promise<void> {
+  await bridge().disconnectWallet();
 }
 
-export async function disconnectWallet(): Promise<boolean> {
-  const r: any = await callBridge("disconnectWallet");
-  if (r?.cancelled) return false;
-  return r?.success === true;
-}
-
-export function encodeUtf8ToBase64(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
+/** UTF-8 → base58. Lazy import bs58 only when actually signing. */
+export async function encodeUtf8ToBase58(s: string): Promise<string> {
+  const { default: bs58 } = await import("bs58");
+  return bs58.encode(new TextEncoder().encode(s));
 }
