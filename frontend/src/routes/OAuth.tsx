@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getAppInfo,
   isInMercleApp,
@@ -7,6 +7,10 @@ import {
 } from "../lib/mercle-bridge";
 import { verifyMercleToken, type VerifiedSession } from "../lib/verify";
 import {
+  clearCachedVerifiedSession,
+  clearPendingSession,
+  getCachedVerifiedSession,
+  getPendingSession,
   runSdkSessionFlow,
   type SdkSession,
   type SdkStatus,
@@ -19,12 +23,14 @@ type Phase =
   | { kind: "booting" }
   | { kind: "no-bridge" }
   | { kind: "authenticating" }
+  | { kind: "needs-verification" }
   | {
       kind: "sdk-session";
       session: SdkSession;
       status: SdkStatus | null;
+      resumed: boolean;
     }
-  | { kind: "ready"; session: VerifiedSession; via: "bridge" | "sdk-session" }
+  | { kind: "ready"; session: VerifiedSession; via: "bridge" | "sdk-session" | "cache" }
   | { kind: "error"; message: string };
 
 export function OAuthPage() {
@@ -32,19 +38,80 @@ export function OAuthPage() {
   const [platform, setPlatform] = useState<string>("browser");
   const abortRef = useRef<AbortController | null>(null);
 
+  const startSdkFlow = useCallback(
+    async (opts: { resume?: ReturnType<typeof getPendingSession> }) => {
+      abortRef.current?.abort();
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
+      try {
+        const user = await runSdkSessionFlow({
+          signal: ctrl.signal,
+          resume: opts.resume ?? undefined,
+          onSession: (session) =>
+            setPhase({
+              kind: "sdk-session",
+              session,
+              status: null,
+              resumed: !!opts.resume,
+            }),
+          onStatus: (status) =>
+            setPhase((prev) =>
+              prev.kind === "sdk-session" ? { ...prev, status } : prev
+            ),
+        });
+        if (ctrl.signal.aborted) return;
+        if (user) {
+          setPhase({ kind: "ready", session: user, via: "sdk-session" });
+        } else {
+          setPhase({
+            kind: "error",
+            message: "Verification didn't complete (rejected, expired, or cancelled).",
+          });
+        }
+      } catch (e) {
+        if (ctrl.signal.aborted) return;
+        setPhase({
+          kind: "error",
+          message: e instanceof Error ? e.message : "SDK session failed",
+        });
+      }
+    },
+    []
+  );
+
+  const onLogout = useCallback(() => {
+    clearCachedVerifiedSession();
+    clearPendingSession();
+    setPhase({ kind: "needs-verification" });
+  }, []);
+
   useEffect(() => {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
     (async () => {
       if (!isInMercleApp()) {
+        // Out of the webview: still show cached session if present, else no-bridge
+        const cached = getCachedVerifiedSession();
+        if (cached) {
+          setPhase({ kind: "ready", session: cached, via: "cache" });
+          return;
+        }
         setPhase({ kind: "no-bridge" });
         return;
       }
+
       setPhase({ kind: "authenticating" });
 
       const info = getAppInfo();
       if (info?.platform) setPlatform(info.platform);
+
+      // Already verified in a previous mount? Show straight away.
+      const cached = getCachedVerifiedSession();
+      if (cached) {
+        setPhase({ kind: "ready", session: cached, via: "cache" });
+        return;
+      }
 
       // Path 1: legacy bridge refreshToken
       let bridgeToken: string | null = null;
@@ -59,14 +126,14 @@ export function OAuthPage() {
           });
           return;
         }
-        // fall through to Path 2
+        // fall through — SDK session
       }
 
       if (bridgeToken) {
         try {
           const session = await verifyMercleToken(bridgeToken);
-          if (!ctrl.signal.aborted)
-            setPhase({ kind: "ready", session, via: "bridge" });
+          if (ctrl.signal.aborted) return;
+          setPhase({ kind: "ready", session, via: "bridge" });
           return;
         } catch (e) {
           if (ctrl.signal.aborted) return;
@@ -78,42 +145,20 @@ export function OAuthPage() {
         }
       }
 
-      // Path 2: SDK session flow
-      try {
-        const user = await runSdkSessionFlow({
-          signal: ctrl.signal,
-          onSession: (session) =>
-            setPhase({ kind: "sdk-session", session, status: null }),
-          onStatus: (status) =>
-            setPhase((prev) =>
-              prev.kind === "sdk-session"
-                ? { ...prev, status }
-                : prev
-            ),
-        });
-        if (ctrl.signal.aborted) return;
-        if (user) {
-          setPhase({ kind: "ready", session: user, via: "sdk-session" });
-        } else {
-          setPhase({
-            kind: "error",
-            message:
-              "SDK session didn't complete (rejected, expired, or cancelled).",
-          });
-        }
-      } catch (e) {
-        if (ctrl.signal.aborted) return;
-        setPhase({
-          kind: "error",
-          message: e instanceof Error ? e.message : "SDK session failed",
-        });
+      // Resume an existing SDK session if we have one, otherwise
+      // show a verify button and wait for user action (no auto-prompt loop).
+      const pending = getPendingSession();
+      if (pending) {
+        void startSdkFlow({ resume: pending });
+        return;
       }
+      setPhase({ kind: "needs-verification" });
     })();
 
     return () => {
       ctrl.abort();
     };
-  }, []);
+  }, [startSdkFlow]);
 
   const bridgePresent = phase.kind !== "no-bridge";
 
@@ -125,7 +170,11 @@ export function OAuthPage() {
         <span className="brand-sub">{platform}</span>
       </header>
 
-      <AuthCard phase={phase} />
+      <AuthCard
+        phase={phase}
+        onStart={() => startSdkFlow({})}
+        onLogout={onLogout}
+      />
 
       {bridgePresent ? <BridgeWalletPanel /> : <FallbackWalletPanel />}
 
@@ -133,16 +182,24 @@ export function OAuthPage() {
 
       <footer className="card">
         <div className="sub">
-          Dual-path auth: bridge <code>refreshToken()</code> first; when the
-          host refuses ("SDK session mode"), the backend creates an SDK session
-          and we render a hidden deep-link anchor the Mercle webview picks up.
+          Dual-path auth with resume. Sessions are cached in{" "}
+          <code>localStorage</code> so reloading the webview after verification
+          shows the signed-in state instead of re-prompting.
         </div>
       </footer>
     </div>
   );
 }
 
-function AuthCard({ phase }: { phase: Phase }) {
+function AuthCard({
+  phase,
+  onStart,
+  onLogout,
+}: {
+  phase: Phase;
+  onStart: () => void;
+  onLogout: () => void;
+}) {
   if (phase.kind === "booting" || phase.kind === "authenticating") {
     return (
       <section className="card">
@@ -170,16 +227,40 @@ function AuthCard({ phase }: { phase: Phase }) {
       </section>
     );
   }
+  if (phase.kind === "needs-verification") {
+    return (
+      <section className="card stack">
+        <div className="row between">
+          <div>
+            <h2>Verify with Mercle</h2>
+            <div className="sub">
+              Bridge token is unavailable — we'll ask Mercle to run face +
+              email verification via an SDK session. Tap below once.
+            </div>
+          </div>
+          <span className="pill muted">paused</span>
+        </div>
+        <button className="btn" onClick={onStart}>
+          Start Mercle verification
+        </button>
+      </section>
+    );
+  }
   if (phase.kind === "sdk-session") {
     const statusLabel = phase.status?.status ?? "creating";
     return (
       <section className="card stack">
         <div className="row between">
           <div>
-            <h2>SDK session in progress</h2>
+            <h2>
+              {phase.resumed
+                ? "Resuming verification…"
+                : "SDK session in progress"}
+            </h2>
             <div className="sub">
-              Bridge refused the token — falling back to SDK session flow.
-              Mercle should now prompt you for face + email verification.
+              {phase.resumed
+                ? "Checking status of your previous Mercle session — no new prompt."
+                : "Mercle should now prompt you for face + email verification."}
             </div>
           </div>
           <span className="pill">
@@ -190,10 +271,6 @@ function AuthCard({ phase }: { phase: Phase }) {
         <div className="kv">
           <div className="k">session</div>
           <div className="v">{phase.session.session_id}</div>
-          <div className="k">expires</div>
-          <div className="v">
-            {phase.session.expires_in_seconds ?? "—"}s
-          </div>
           {phase.status && phase.status.status !== "approved" && phase.status.rejection_reason ? (
             <>
               <div className="k">reason</div>
@@ -209,16 +286,19 @@ function AuthCard({ phase }: { phase: Phase }) {
   }
   if (phase.kind === "error") {
     return (
-      <section className="card">
+      <section className="card stack">
         <h2>Couldn't sign you in</h2>
         <div className="alert error">{phase.message}</div>
+        <button className="btn secondary" onClick={onStart}>
+          Try again
+        </button>
       </section>
     );
   }
   const { session, via } = phase;
   return (
-    <section className="card">
-      <div className="row" style={{ marginBottom: 12 }}>
+    <section className="card stack">
+      <div className="row" style={{ gap: 12 }}>
         {session.pfp_url ? (
           <img className="avatar" src={session.pfp_url} alt="" />
         ) : (
@@ -235,6 +315,9 @@ function AuthCard({ phase }: { phase: Phase }) {
           <span key={s} className="pill">{s}</span>
         ))}
       </div>
+      <button className="btn secondary" onClick={onLogout}>
+        Sign out of this demo
+      </button>
     </section>
   );
 }
